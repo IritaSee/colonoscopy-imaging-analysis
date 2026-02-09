@@ -1,5 +1,3 @@
-# Texture Analysis Project Requirements
-# Generated from research notebooks
 
 # Core scientific computing
 numpy>=1.21.0
@@ -14,3 +12,8 @@ seaborn>=0.11.0
 
 # Image processing
 scikit-image>=0.18.0
+opencv-python-headless>=4.5.0
+
+# Web Application
+streamlit>=1.10.0
+watchdog>=2.1.0

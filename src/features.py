@@ -204,3 +204,49 @@ def extract_all_features(gray_img, levels=32):
         features[n] = v
         
     return features
+
+# --- Heatmap Generation ---
+from skimage.filters.rank import entropy
+from skimage.morphology import disk
+from scipy.ndimage import generic_filter
+
+def generate_texture_heatmap(gray_img, method='entropy', disk_size=3):
+    """
+    Generates a normalized texture heatmap from a grayscale image.
+    
+    Args:
+        gray_img (numpy.ndarray): Input grayscale image.
+        method (str): 'entropy' or 'std' (standard deviation).
+        disk_size (int): Radius of the neighborhood disk.
+        
+    Returns:
+        numpy.ndarray: Read-to-use BGR heatmap (color-mapped) or raw normalized float map depending on pipeline need.
+                       Here we return the raw normalized map in 0-1 range for flexibility.
+    """
+    
+    if method == 'entropy':
+        # Entropy filter requires uint8
+        if gray_img.dtype != np.uint8:
+            img_uint8 = (gray_img).astype(np.uint8)
+        else:
+            img_uint8 = gray_img
+            
+        # Compute local entropy
+        texture_map = entropy(img_uint8, disk(disk_size))
+        
+    elif method == 'std':
+        # Local Standard Deviation
+        # Using a faster approximation or generic_filter
+        texture_map = generic_filter(gray_img, np.std, size=2*disk_size+1)
+        
+    else:
+        # Default fallback
+        texture_map = np.zeros_like(gray_img, dtype=np.float32)
+
+    # Normalize to 0-1 for visualization
+    if texture_map.max() > texture_map.min():
+        texture_map = (texture_map - texture_map.min()) / (texture_map.max() - texture_map.min())
+    else:
+        texture_map = np.zeros_like(texture_map)
+        
+    return texture_map

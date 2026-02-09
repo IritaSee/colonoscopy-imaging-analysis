@@ -121,13 +121,45 @@ if mode == "Single Image Analysis":
             st.markdown("### Texture Analysis")
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
+            # --- Heatmap Overlay Control ---
+            st.markdown("#### Heatmap Overlay")
+            heatmap_method = st.selectbox("Method", ["None", "Local Entropy (Complexity)", "Local Std Dev (Roughness)"])
+            
+            overlay_img = None
+            if heatmap_method != "None":
+                alpha = st.slider("Overlay Opacity", 0.0, 1.0, 0.4, 0.05)
+                
+                method_key = 'entropy' if "Entropy" in heatmap_method else 'std'
+                with st.spinner(f"Generating {heatmap_method}..."):
+                    try:
+                        from features import generate_texture_heatmap
+                        texture_map_norm = generate_texture_heatmap(gray, method=method_key)
+                        
+                        # Apply colormap
+                        heatmap_uint8 = (texture_map_norm * 255).astype(np.uint8)
+                        heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+                        
+                        # Resize heatmap to match original image if needed (should be same size but good practice)
+                        if heatmap_color.shape[:2] != image.shape[:2]:
+                            heatmap_color = cv2.resize(heatmap_color, (image.shape[1], image.shape[0]))
+                            
+                        # Blend
+                        overlay_img = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
+                        
+                        st.image(overlay_img, channels="BGR", caption=f"{heatmap_method} Overlay", use_container_width=True)
+                        
+                    except Exception as e:
+                        st.error(f"Error generating heatmap: {e}")
+
+            st.markdown("---")
+            
             with st.spinner("Extracting Features..."):
                 try:
                     feats = extract_all_features(gray, levels=glcm_levels)
                     
                     # Display Top Features
                     feat_df = pd.DataFrame(feats.items(), columns=["Feature", "Value"])
-                    st.dataframe(feat_df, height=300)
+                    st.dataframe(feat_df, height=200)
                     
                 except Exception as e:
                     st.error(f"Error: {e}")

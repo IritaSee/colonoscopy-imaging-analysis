@@ -1,5 +1,6 @@
 
 import numpy as np
+import cv2
 
 def first_order_features(gray_img):
     """
@@ -168,6 +169,80 @@ def glcm_features(glcm_avg, levels):
 
     return [asm, contrast, correlation, variance, idm, sum_avg, sum_var, sum_ent, ent, diff_var, diff_ent, imc1, imc2, mcc]
 
+
+def _quantize_to_levels(gray_u8, levels):
+    """Map uint8 [0..255] -> uint8 [0..levels-1]."""
+    if levels <= 1:
+        return np.zeros_like(gray_u8, dtype=np.uint8)
+    # Use floor mapping for stable bins
+    q = (gray_u8.astype(np.int32) * levels) // 256
+    q = np.clip(q, 0, levels - 1).astype(np.uint8)
+    return q
+
+def _average_glcm_over_offsets(patch_q, offsets, levels):
+    """Average symmetric GLCM over a list of (dx,dy) offsets."""
+    glcms = []
+    for dx, dy in offsets:
+        glcms.append(calculate_glcm(patch_q, dx=dx, dy=dy, levels=levels))
+    glcm_avg = np.mean(glcms, axis=0) if len(glcms) else np.zeros((levels, levels), dtype=np.float64)
+    # Re-normalize
+    s = glcm_avg.sum()
+    if s > 0:
+        glcm_avg = glcm_avg / s
+    return glcm_avg
+
+def texture_feature_maps(gray_img_u8, win=32, step=8, levels=32, offsets=None, features_to_map=None):
+    """
+    Compute local texture feature maps by sliding-window GLCM analysis.
+    
+    Returns:
+        fmap_dict: dict[str, 2D float array]
+        meta: dict with coords and coverage
+    """
+    if offsets is None:
+        offsets = [(1, 0), (1, -1), (0, -1), (-1, -1)]
+    if features_to_map is None:
+        features_to_map = ['Contrast', 'Homogeneity', 'Entropy_GLCM', 'Entropy']
+
+    H, W = gray_img_u8.shape
+    ys = list(range(0, H - win + 1, step))
+    xs = list(range(0, W - win + 1, step))
+    if len(ys) == 0 or len(xs) == 0:
+        return {}, {"ys": ys, "xs": xs, "covered_w": 0, "covered_h": 0}
+
+    covered_w = xs[-1] + win
+    covered_h = ys[-1] + win
+
+    # Prepare outputs
+    fmap_dict = {k: np.zeros((len(ys), len(xs)), dtype=np.float32) for k in features_to_map}
+
+    for iy, y in enumerate(ys):
+        for ix, x in enumerate(xs):
+            patch = gray_img_u8[y:y+win, x:x+win]
+
+            # First-order features
+            fo = first_order_features(patch)
+            fo_names = ['Mean', 'Variance', 'Skewness', 'Kurtosis', 'Energy', 'Entropy']
+            fo_map = dict(zip(fo_names, fo))
+
+            # GLCM features
+            patch_q = _quantize_to_levels(patch, levels)
+            glcm_avg = _average_glcm_over_offsets(patch_q, offsets, levels)
+            gl = glcm_features(glcm_avg, levels)
+            gl_names = ['ASM', 'Contrast', 'Correlation', 'Variance_GLCM', 'Homogeneity', 
+                        'Sum_Average', 'Sum_Variance', 'Sum_Entropy', 'Entropy_GLCM', 
+                        'Difference_Variance', 'Difference_Entropy', 'IMC1', 'IMC2', 'MCC']
+            gl_map = dict(zip(gl_names, gl))
+
+            for name in features_to_map:
+                if name in fo_map:
+                    fmap_dict[name][iy, ix] = fo_map[name]
+                elif name in gl_map:
+                    fmap_dict[name][iy, ix] = gl_map[name]
+
+    meta = {"ys": ys, "xs": xs, "covered_w": covered_w, "covered_h": covered_h}
+    return fmap_dict, meta
+
 def extract_all_features(gray_img, levels=32):
     """
     Wrapper to extract both first-order and GLCM features.
@@ -210,21 +285,31 @@ from skimage.filters.rank import entropy
 from skimage.morphology import disk
 from scipy.ndimage import generic_filter
 
-def generate_texture_heatmap(gray_img, method='entropy', disk_size=3):
+
+def generate_texture_heatmap(gray_img, method='entropy', disk_size=3, win=32, step=8, levels=32):
     """
     Generates a normalized texture heatmap from a grayscale image.
     
     Args:
         gray_img (numpy.ndarray): Input grayscale image.
-        method (str): 'entropy' or 'std' (standard deviation).
-        disk_size (int): Radius of the neighborhood disk.
-        
-    Returns:
-        numpy.ndarray: Read-to-use BGR heatmap (color-mapped) or raw normalized float map depending on pipeline need.
-                       Here we return the raw normalized map in 0-1 range for flexibility.
+        method (str): 'entropy', 'std', or 'sliding_window'.
+        disk_size (int): Radius for 'entropy' and 'std' methods.
+        win (int): Window size for 'sliding_window'.
+        step (int): Step size for 'sliding_window'.
+        levels (int): GLCM levels for 'sliding_window'.
     """
     
-    if method == 'entropy':
+    if method == 'sliding_window':
+        # Default to Entropy_GLCM as the primary "complexity" measure for sliding window
+        fmap_dict, meta = texture_feature_maps(gray_img, win=win, step=step, levels=levels, features_to_map=['Entropy_GLCM'])
+        if 'Entropy_GLCM' in fmap_dict:
+            raw_map = fmap_dict['Entropy_GLCM']
+            # Resize back to original image size for overlay
+            texture_map = cv2.resize(raw_map, (gray_img.shape[1], gray_img.shape[0]), interpolation=cv2.INTER_CUBIC)
+        else:
+            texture_map = np.zeros_like(gray_img, dtype=np.float32)
+
+    elif method == 'entropy':
         # Entropy filter requires uint8
         if gray_img.dtype != np.uint8:
             img_uint8 = (gray_img).astype(np.uint8)

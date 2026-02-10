@@ -81,12 +81,15 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.title("Settings")
     
-    # input_source = st.selectbox("Input Source", ["Upload Video", "Webcam"]) 
-    # For now, simplifying as per user request to focus on Image first
     mode = st.radio("Mode", ["Single Image Analysis", "Video/Real-time"])
     
     st.markdown("### Analysis Parameters")
     glcm_levels = st.slider("GLCM Levels", 8, 256, 32, step=8)
+    
+    # --- New Sliding Window Parameters ---
+    st.markdown("### Sliding Window Config")
+    win_size = st.slider("Window Size (px)", 16, 128, 32, step=8)
+    step_size = st.slider("Step Size (px)", 4, 64, 8, step=4)
     
     st.markdown("---")
     st.markdown("*Developed by Deepmind Agent*")
@@ -101,51 +104,53 @@ if mode == "Single Image Analysis":
     </div>
     """, unsafe_allow_html=True)
     
-    # Agentic Upload Area - Centered and Clean
     uploaded_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], help="Drop a colonoscopy frame here", label_visibility="collapsed")
     
     if uploaded_file is not None:
-        # Read Image
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
         image = cv2.imdecode(file_bytes, 1)
         
-        # Layout: Image on Left, Analysis on Right
         col1, col2 = st.columns([1, 1])
         
         with col1:
             st.image(image, channels="BGR", caption="Uploaded Frame", use_container_width=True)
-            # Keeping use_container_width=True for now as it works in 1.x without error, just warning. 
-            # width="stretch" is for 1.40+ or so.
             
         with col2:
             st.markdown("### Texture Analysis")
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # --- Heatmap Overlay Control ---
             st.markdown("#### Heatmap Overlay")
-            heatmap_method = st.selectbox("Method", ["None", "Local Entropy (Complexity)", "Local Std Dev (Roughness)"])
+            heatmap_method = st.selectbox("Method", [
+                "None", 
+                "Sliding Window (Detailed Patch Analysis)",
+                "Local Entropy (Complexity)", 
+                "Local Std Dev (Roughness)"
+            ])
             
             overlay_img = None
             if heatmap_method != "None":
                 alpha = st.slider("Overlay Opacity", 0.0, 1.0, 0.4, 0.05)
                 
-                method_key = 'entropy' if "Entropy" in heatmap_method else 'std'
+                method_key = 'sliding_window' if "Sliding" in heatmap_method else ('entropy' if "Entropy" in heatmap_method else 'std')
+                
                 with st.spinner(f"Generating {heatmap_method}..."):
                     try:
                         from features import generate_texture_heatmap
-                        texture_map_norm = generate_texture_heatmap(gray, method=method_key)
+                        texture_map_norm = generate_texture_heatmap(
+                            gray, 
+                            method=method_key, 
+                            win=win_size, 
+                            step=step_size, 
+                            levels=glcm_levels
+                        )
                         
-                        # Apply colormap
                         heatmap_uint8 = (texture_map_norm * 255).astype(np.uint8)
                         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
                         
-                        # Resize heatmap to match original image if needed (should be same size but good practice)
                         if heatmap_color.shape[:2] != image.shape[:2]:
                             heatmap_color = cv2.resize(heatmap_color, (image.shape[1], image.shape[0]))
                             
-                        # Blend
                         overlay_img = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
-                        
                         st.image(overlay_img, channels="BGR", caption=f"{heatmap_method} Overlay", use_container_width=True)
                         
                     except Exception as e:
@@ -156,59 +161,122 @@ if mode == "Single Image Analysis":
             with st.spinner("Extracting Features..."):
                 try:
                     feats = extract_all_features(gray, levels=glcm_levels)
-                    
-                    # Display Top Features
                     feat_df = pd.DataFrame(feats.items(), columns=["Feature", "Value"])
                     st.dataframe(feat_df, height=200)
-                    
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-        # Full Width Visualizations
         st.markdown("---")
         st.markdown("### Feature Distribution Heatmap")
         
-        # Heatmap
         current_vector = np.array(list(feats.values()))
-        z_scores = (current_vector - np.mean(current_vector)) / (np.std(current_vector) + 1e-5) # Simple self-normalization for viz
+        z_scores = (current_vector - np.mean(current_vector)) / (np.std(current_vector) + 1e-5)
         
+        # Reshape according to actual feature count (6 FO + 14 GLCM = 20)
         z_grid = z_scores.reshape(4, 5)
         fig, ax = plt.subplots(figsize=(10, 3))
-        # Dark background for plot
         fig.patch.set_facecolor('#222831')
         ax.set_facecolor('#222831')
         
-        # Custom annotations
         sns.heatmap(z_grid, cmap='viridis', center=0, annot=True, fmt=".1f", cbar=True, ax=ax, 
                     yticklabels=False, xticklabels=False)
         
-        # Update text color for dark mode
         cbar = ax.collections[0].colorbar
         cbar.ax.yaxis.set_tick_params(color='white')
         plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-        
         st.pyplot(fig)
         plt.close(fig)
 
 elif mode == "Video/Real-time":
-    st.warning("Video Mode is currently in beta. Switch to 'Single Image Analysis' for the stable agentic flow.")
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <h1>Video Texture Analysis</h1>
+        <p style="color: #AAAAAA;">Analyze colonoscopy video streams for texture anomalies in real-time.</p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Legacy video code (optional to keep or comment out)
-    # Keeping the processing function but not calling it directly unless uploaded
     uploaded_video = st.file_uploader("Upload Video", type=["mp4", "avi"])
+    
     if uploaded_video:
         tfile = tempfile.NamedTemporaryFile(delete=False) 
         tfile.write(uploaded_video.read())
         
-        col1, col2 = st.columns([2, 1])
-        with col1:
+        cap = cv2.VideoCapture(tfile.name)
+        
+        st.markdown("#### Video Heatmap Control")
+        heatmap_method_vid = st.selectbox("Heatmap Method (Video)", [
+            "None", 
+            "Sliding Window (Patch Analysis)",
+            "Local Entropy", 
+            "Local Std Dev"
+        ], key="vid_method")
+        
+        v_col1, v_col2 = st.columns([2, 1])
+        with v_col1:
             video_placeholder = st.empty()
-        with col2:
-            status_placeholder = st.empty()
-            features_placeholder = st.empty()
-            heatmap_placeholder = st.empty()
+        with v_col2:
+            st.markdown("#### Stats")
+            fps_placeholder = st.empty()
+            feats_placeholder = st.empty()
+
+        # Optimization Parameters
+        frame_skip = 5 # Process every 5th frame
+        count = 0
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
             
-        # Re-using the process logic would require slight adaptation to not use global input_source
-        # For now, let's just focus on image as requested.
+            count += 1
+            if count % frame_skip != 0:
+                continue
+                
+            start_time = time.time()
+            
+            # --- Processing ---
+            # 1. Downsample for speed
+            small_frame = cv2.resize(frame, (400, 400))
+            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+            
+            processed_display = frame.copy()
+            
+            if heatmap_method_vid != "None":
+                method_key = 'sliding_window' if "Sliding" in heatmap_method_vid else ('entropy' if "Entropy" in heatmap_method_vid else 'std')
+                
+                try:
+                    from features import generate_texture_heatmap
+                    # Use smaller window for video if sliding window to keep it faster
+                    v_win = win_size if method_key != 'sliding_window' else max(16, win_size)
+                    v_step = step_size if method_key != 'sliding_window' else max(8, step_size)
+                    
+                    texture_map = generate_texture_heatmap(gray, method=method_key, win=v_win, step=v_step, levels=glcm_levels)
+                    
+                    heatmap_uint8 = (texture_map * 255).astype(np.uint8)
+                    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+                    heatmap_color = cv2.resize(heatmap_color, (frame.shape[1], frame.shape[0]))
+                    
+                    processed_display = cv2.addWeighted(frame, 0.6, heatmap_color, 0.4, 0)
+                except:
+                    pass
+
+            # Update UI
+            video_placeholder.image(processed_display, channels="BGR", use_container_width=True)
+            
+            end_time = time.time()
+            fps = 1.0 / (end_time - start_time + 1e-6)
+            fps_placeholder.metric("Processing FPS", f"{fps:.1f}")
+            
+            # Extract features for current frame
+            try:
+                current_feats = extract_all_features(gray, levels=glcm_levels)
+                feat_df_vid = pd.DataFrame(current_feats.items(), columns=["Feature", "Value"])
+                feats_placeholder.dataframe(feat_df_vid, height=300)
+            except:
+                pass
+                
+            time.sleep(0.01)
+            
+        cap.release()
 
 

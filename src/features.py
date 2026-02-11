@@ -243,29 +243,52 @@ def texture_feature_maps(gray_img_u8, win=32, step=8, levels=32, offsets=None, f
     meta = {"ys": ys, "xs": xs, "covered_w": covered_w, "covered_h": covered_h}
     return fmap_dict, meta
 
+def extract_refined_features(gray_img, levels=32):
+    """
+    Extracts the 'Significant 5' texture features identified in research
+    as highly correlated with Mayo Endoscopic Score (MES).
+    
+    Features: Contrast, Homogeneity, Entropy (First-order), Energy, ASM.
+    Standardized GLCM: distances=[1], angles=[0, 45, 90, 135], levels=32.
+    """
+    # 1. First Order
+    fo_vals = first_order_features(gray_img)
+    fo_map = dict(zip(['Mean', 'Variance', 'Skewness', 'Kurtosis', 'Energy', 'Entropy'], fo_vals))
+    
+    # 2. GLCM
+    gray_quant = _quantize_to_levels(gray_img, levels)
+    # 0, 45, 90, 135 offsets at distance 1
+    offsets = [(1, 0), (1, -1), (0, -1), (-1, -1)]
+    glcm_avg = _average_glcm_over_offsets(gray_quant, offsets, levels)
+    gl_vals = glcm_features(glcm_avg, levels)
+    gl_map = dict(zip(['ASM', 'Contrast', 'Correlation', 'Variance_GLCM', 'Homogeneity', 
+                      'Sum_Average', 'Sum_Variance', 'Sum_Entropy', 'Entropy_GLCM', 
+                      'Difference_Variance', 'Difference_Entropy', 'IMC1', 'IMC2', 'MCC'], gl_vals))
+    
+    # Consolidate into Refined Set
+    refined = {
+        "Contrast": gl_map["Contrast"],
+        "Homogeneity": gl_map["Homogeneity"],
+        "Entropy": fo_map["Entropy"],
+        "Energy": fo_map["Energy"],
+        "ASM": gl_map["ASM"],
+        "Correlation": gl_map["Correlation"],
+        "Entropy_GLCM": gl_map["Entropy_GLCM"]  # Highly monotonic predictor for MES stages
+    }
+    
+    return refined
+
 def extract_all_features(gray_img, levels=32):
     """
-    Wrapper to extract both first-order and GLCM features.
-    
-    1. First-Order (6 features)
-    2. GLCM (14 features) -> Averaged over 4 directions
-    
-    Returns:
-        dict: feature_name -> value
+    Backwards compatible wrapper to extract all 20 features.
     """
-    
-    # 1. First Order
+    # Implementation kept for compatibility
     fo_vals = first_order_features(gray_img)
     fo_names = ['Mean', 'Variance', 'Skewness', 'Kurtosis', 'Energy', 'Entropy']
     
-    # 2. GLCM
-    # Quantize image for GLCM
-    # assuming gray_img is 0-255
-    gray_quant = (gray_img // (256 // levels)).astype(int)
-    
-    directions = [(1, 0), (1, 1), (0, 1), (-1, 1)]
-    glcms = [calculate_glcm(gray_quant, dx, dy, levels) for dx, dy in directions]
-    glcm_avg = np.mean(glcms, axis=0)
+    gray_quant = _quantize_to_levels(gray_img, levels)
+    offsets = [(1, 0), (1, -1), (0, -1), (-1, -1)]
+    glcm_avg = _average_glcm_over_offsets(gray_quant, offsets, levels)
     
     glcm_vals = glcm_features(glcm_avg, levels)
     glcm_names = ['ASM', 'Contrast', 'Correlation', 'Variance_GLCM', 'Homogeneity', 
@@ -286,7 +309,7 @@ from skimage.morphology import disk
 from scipy.ndimage import generic_filter
 
 
-def generate_texture_heatmap(gray_img, method='entropy', disk_size=3, win=32, step=8, levels=32):
+def generate_texture_heatmap(gray_img, method='entropy', disk_size=3, win=32, step=8, levels=32, feature_to_map='Entropy_GLCM'):
     """
     Generates a normalized texture heatmap from a grayscale image.
     
@@ -297,16 +320,18 @@ def generate_texture_heatmap(gray_img, method='entropy', disk_size=3, win=32, st
         win (int): Window size for 'sliding_window'.
         step (int): Step size for 'sliding_window'.
         levels (int): GLCM levels for 'sliding_window'.
+        feature_to_map (str): Specific feature to map (if sliding_window).
     """
     
     if method == 'sliding_window':
-        # Default to Entropy_GLCM as the primary "complexity" measure for sliding window
-        fmap_dict, meta = texture_feature_maps(gray_img, win=win, step=step, levels=levels, features_to_map=['Entropy_GLCM'])
-        if 'Entropy_GLCM' in fmap_dict:
-            raw_map = fmap_dict['Entropy_GLCM']
+        # Use the requested feature for sliding window mapping
+        fmap_dict, meta = texture_feature_maps(gray_img, win=win, step=step, levels=levels, features_to_map=[feature_to_map])
+        if feature_to_map in fmap_dict:
+            raw_map = fmap_dict[feature_to_map]
             # Resize back to original image size for overlay
             texture_map = cv2.resize(raw_map, (gray_img.shape[1], gray_img.shape[0]), interpolation=cv2.INTER_CUBIC)
         else:
+            # Fallback if feature missing
             texture_map = np.zeros_like(gray_img, dtype=np.float32)
 
     elif method == 'entropy':

@@ -13,7 +13,75 @@ import seaborn as sns
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
-from features import extract_all_features
+from features import extract_refined_features, extract_all_features, generate_texture_heatmap
+
+# Reference Baselines (Calibrated from data_sample/ benchmark)
+MAYO_BASELINES = {
+    "M0 (Normal)": {
+        "Contrast": 1.15, "Homogeneity": 0.79, "Entropy": 6.11, 
+        "Energy": 0.047, "ASM": 0.073, "Correlation": 0.97, 
+        "Entropy_GLCM": 5.08
+    },
+    "M3 (Severe)": {
+        "Contrast": 2.10, "Homogeneity": 0.73, "Entropy": 6.51, 
+        "Energy": 0.038, "ASM": 0.055, "Correlation": 0.96, 
+        "Entropy_GLCM": 5.79
+    }
+}
+
+# Critical Thresholds for "Top 5" Features (Normal vs. Abnormal cut-off)
+REFERENCE_THRESHOLDS = {
+    "Contrast": 1.8,      # > threshold is abnormal
+    "Homogeneity": 0.75,  # < threshold is abnormal
+    "Entropy": 6.30,      # > threshold is abnormal
+    "Energy": 0.045,      # < threshold is abnormal
+    "ASM": 0.068          # < threshold is abnormal
+}
+
+def plot_radar_comparison(current_feats):
+    """Generates a radar chart comparing current features against M0 and M3 baselines."""
+    from math import pi
+    
+    categories = list(current_feats.keys())
+    N = len(categories)
+    
+    # What's the angle of each axis? (we divide the plot / number of variable)
+    angles = [n / float(N) * 2 * pi for n in range(N)]
+    angles += angles[:1]
+    
+    fig, ax = plt.subplots(figsize=(6, 6), subplot_kw=dict(polar=True))
+    fig.patch.set_facecolor('#222831')
+    ax.set_facecolor('#393E46')
+    
+    # Helper to draw a line
+    def draw_line(data_dict, label, color, linestyle='solid', alpha=0.25):
+        values = [data_dict.get(c, 0) for c in categories]
+        # Simple normalization for radar visibility (research used normalized 0-1)
+        # Here we just want to show the 'shape'
+        norm_v = []
+        for i, c in enumerate(categories):
+            # Use .get with fallback to avoid KeyErrors if baselines are missing certain features
+            b3_val = MAYO_BASELINES["M3 (Severe)"].get(c, 1.0)
+            max_v = max(b3_val, data_dict.get(c, 0))
+            norm_v.append(data_dict.get(c, 0) / (max_v + 1e-5))
+        
+        norm_v += norm_v[:1]
+        ax.plot(angles, norm_v, linewidth=2, linestyle=linestyle, label=label, color=color)
+        ax.fill(angles, norm_v, color=color, alpha=alpha)
+
+    draw_line(MAYO_BASELINES["M0 (Normal)"], "M0 Baseline", "#4E9F3D", linestyle='dashed', alpha=0.1)
+    draw_line(MAYO_BASELINES["M3 (Severe)"], "M3 Baseline", "#950101", linestyle='dashed', alpha=0.1)
+    draw_line(current_feats, "Current Frame", "#00ADB5", alpha=0.4)
+    
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories, color='white', size=8)
+    ax.set_yticklabels([])
+    ax.spines['polar'].set_color('#AAAAAA')
+    
+    plt.title("Texture Signature vs Baselines", color='#00ADB5', size=14, pad=20)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
+    
+    return fig
 
 # Page Config
 st.set_page_config(
@@ -72,7 +140,7 @@ st.markdown("""
 
 # Sidebar
 with st.sidebar:
-    # st.image("assets/logo.png", use_container_width=True) # Will enable after generation
+    # st.image("assets/logo.png", width='stretch') # Will enable after generation
     st.markdown("""
     <div style="text-align: center; margin-bottom: 20px;">
         <span style="font-size: 3rem;">🧬</span>
@@ -113,7 +181,7 @@ if mode == "Single Image Analysis":
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.image(image, channels="BGR", caption="Uploaded Frame", use_container_width=True)
+            st.image(image, channels="BGR", caption="Uploaded Frame", width='stretch')
             
         with col2:
             st.markdown("### Texture Analysis")
@@ -122,7 +190,7 @@ if mode == "Single Image Analysis":
             st.markdown("#### Heatmap Overlay")
             heatmap_method = st.selectbox("Method", [
                 "None", 
-                "Sliding Window (Detailed Patch Analysis)",
+                "Sliding Window (Detailed Mapping)",
                 "Local Entropy (Complexity)", 
                 "Local Std Dev (Roughness)"
             ])
@@ -131,17 +199,24 @@ if mode == "Single Image Analysis":
             if heatmap_method != "None":
                 alpha = st.slider("Overlay Opacity", 0.0, 1.0, 0.4, 0.05)
                 
+                # --- Advanced Feature Mapping ---
+                feat_to_map = "Entropy_GLCM"
+                if "Sliding" in heatmap_method:
+                    feat_to_map = st.selectbox("Feature to Map", [
+                        "Entropy_GLCM", "Correlation", "Contrast", "Homogeneity", "ASM", "MCC"
+                    ], help="Select which GLCM feature to project onto the heatmap.")
+
                 method_key = 'sliding_window' if "Sliding" in heatmap_method else ('entropy' if "Entropy" in heatmap_method else 'std')
                 
                 with st.spinner(f"Generating {heatmap_method}..."):
                     try:
-                        from features import generate_texture_heatmap
                         texture_map_norm = generate_texture_heatmap(
                             gray, 
                             method=method_key, 
                             win=win_size, 
                             step=step_size, 
-                            levels=glcm_levels
+                            levels=glcm_levels,
+                            feature_to_map=feat_to_map
                         )
                         
                         heatmap_uint8 = (texture_map_norm * 255).astype(np.uint8)
@@ -151,41 +226,104 @@ if mode == "Single Image Analysis":
                             heatmap_color = cv2.resize(heatmap_color, (image.shape[1], image.shape[0]))
                             
                         overlay_img = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
-                        st.image(overlay_img, channels="BGR", caption=f"{heatmap_method} Overlay", use_container_width=True)
+                        st.image(overlay_img, channels="BGR", caption=f"{heatmap_method} Overlay", width='stretch')
+                        
+                        # Display Patch Count (Request: heatmapping count)
+                        h, w = texture_map_norm.shape
+                        st.metric("Patches Analyzed", f"{h} x {w}", help="Total unique sliding window positions processed.")
                         
                     except Exception as e:
                         st.error(f"Error generating heatmap: {e}")
 
             st.markdown("---")
             
-            with st.spinner("Extracting Features..."):
+            with st.spinner("Extracting Refined Features..."):
                 try:
-                    feats = extract_all_features(gray, levels=glcm_levels)
+                    # UPDATED: Use extract_refined_features
+                    feats = extract_refined_features(gray, levels=glcm_levels)
                     feat_df = pd.DataFrame(feats.items(), columns=["Feature", "Value"])
-                    st.dataframe(feat_df, height=200)
+                    st.dataframe(feat_df, hide_index=True)
                 except Exception as e:
                     st.error(f"Error: {e}")
 
         st.markdown("---")
-        st.markdown("### Feature Distribution Heatmap")
+        col_c1, col_c2 = st.columns([1, 1])
         
-        current_vector = np.array(list(feats.values()))
-        z_scores = (current_vector - np.mean(current_vector)) / (np.std(current_vector) + 1e-5)
+        with col_c1:
+            st.markdown("### Feature Signature")
+            radar_fig = plot_radar_comparison(feats)
+            st.pyplot(radar_fig)
+            plt.close(radar_fig)
+
+        with col_c2:
+            st.markdown("### 🎯 Top 5 Feature Analysis")
+            
+            # Comparison against Reference Thresholds
+            comparison_data = []
+            for feat, threshold in REFERENCE_THRESHOLDS.items():
+                curr_val = feats.get(feat, 0)
+                is_abnormal = False
+                if feat in ["Contrast", "Entropy"]:
+                    is_abnormal = curr_val > threshold
+                else:
+                    is_abnormal = curr_val < threshold
+                
+                status = "🔴 Abnormal" if is_abnormal else "🟢 Normal"
+                comparison_data.append({
+                    "Feature": feat,
+                    "Current": f"{curr_val:.3f}",
+                    "Threshold": f"{threshold:.3f}",
+                    "Status": status
+                })
+            
+            st.table(pd.DataFrame(comparison_data))
+
+            st.markdown("---")
+            st.markdown("### 🧪 Probability Model")
+            from analytics import calculate_mes_probability
+            prob = calculate_mes_probability(feats, MAYO_BASELINES)
+            
+            st.metric("Inflammation Probability", f"{prob*100:.1f}%", help="Likelihood of active inflammation (MES >= 1) based on multivariate texture distance.")
+            
+            if prob > 0.7:
+                st.error("⚠️ Consistent with Severe Inflammation (likely MES 2-3)")
+            elif prob < 0.3:
+                st.success("✅ Consistent with Normal/Mild mucosal state (likely MES 0-1)")
+            else:
+                st.warning(f"ℹ️ Moderate Activity detected ({prob*100:.0f}%)")
+            
+            st.info("""
+            **Reference Note:**  
+            The Top 5 features (Contrast, Homogeneity, Entropy, Energy, ASM) are the primary indicators used for threshold-based analysis.
+            """)
+
+        st.markdown("---")
+        st.markdown("### 📊 Full Feature Distribution Heatmap (20 Features)")
         
-        # Reshape according to actual feature count (6 FO + 14 GLCM = 20)
-        z_grid = z_scores.reshape(4, 5)
-        fig, ax = plt.subplots(figsize=(10, 3))
-        fig.patch.set_facecolor('#222831')
-        ax.set_facecolor('#222831')
-        
-        sns.heatmap(z_grid, cmap='viridis', center=0, annot=True, fmt=".1f", cbar=True, ax=ax, 
-                    yticklabels=False, xticklabels=False)
-        
-        cbar = ax.collections[0].colorbar
-        cbar.ax.yaxis.set_tick_params(color='white')
-        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-        st.pyplot(fig)
-        plt.close(fig)
+        with st.spinner("Calculating full feature set..."):
+            all_feats = extract_all_features(gray, levels=glcm_levels)
+            all_vals = np.array(list(all_feats.values()))
+            all_z = (all_vals - np.mean(all_vals)) / (np.std(all_vals) + 1e-5)
+            
+            # Reshape for a 4x5 heatmap grid (Original Layout)
+            z_grid = all_z.reshape(4, 5)
+            feat_names_grid = np.array(list(all_feats.keys())).reshape(4, 5)
+            
+            fig_z, ax_z = plt.subplots(figsize=(10, 5))
+            fig_z.patch.set_facecolor('#222831')
+            ax_z.set_facecolor('#222831')
+            
+            sns.heatmap(z_grid, cmap='viridis', center=0, annot=feat_names_grid, fmt="", cbar=True, ax=ax_z, 
+                        yticklabels=False, xticklabels=False, annot_kws={"size": 8, "color": "white"})
+            
+            # Colorbar styling
+            cbar = ax_z.collections[0].colorbar
+            cbar.ax.yaxis.set_tick_params(color='white')
+            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
+            
+            st.pyplot(fig_z)
+            plt.close(fig_z)
+            st.caption("Lower Values (Purple) | Higher Values (Yellow) relative to frame average across all 20 texture metrics.")
 
 elif mode == "Video/Real-time":
     st.markdown("""
@@ -214,8 +352,104 @@ elif mode == "Video/Real-time":
         v_col1, v_col2 = st.columns([2, 1])
         with v_col1:
             video_placeholder = st.empty()
+            if heatmap_method_vid != "None" and "Sliding" in heatmap_method_vid:
+                feat_to_map_vid = st.selectbox("Feature to Map (Video)", [
+                    "Contrast", "Homogeneity", "Entropy", "Energy", "ASM", "Correlation"
+                ], key="vid_feat")
+            else:
+                feat_to_map_vid = "Contrast"
+
+            if st.button("🚀 Run Full Video Analysis (Batch Process)"):
+                with st.spinner("Processing every second of video..."):
+                    try:
+                        from video_analyzer import analyze_video
+                        from analytics import smooth_video_features, detect_change_points
+                        
+                        # Temp output CSV
+                        out_csv = tfile.name + "_features.csv"
+                        df_results = analyze_video(tfile.name, output_csv=out_csv, sample_rate_fps=1.0)
+                        
+                        # Apply Smoothing
+                        smooth_win = st.sidebar.slider("Smoothing Window", 1, 11, 5, step=2)
+                        df_smooth = smooth_video_features(df_results, window=smooth_win)
+                        
+                        st.success(f"Analysis complete! Processed {len(df_results)} frames.")
+                        
+                        # --- NEW: Threshold Calibration UI ---
+                        st.markdown("---")
+                        st.markdown("### 🎯 Dynamic Threshold Calibration")
+                        
+                        # Set Default Heuristics
+                        current_thresholds = {
+                            "Contrast": df_results["Contrast"].mean() * 1.5,
+                            "Homogeneity": df_results["Homogeneity"].mean() * 0.8
+                        }
+                        
+                        calc_col1, calc_col2 = st.columns([1, 1])
+                        
+                        with calc_col1:
+                            st.write("**Calibration Source:**")
+                            gt_file = st.file_uploader("Upload Ground Truth (CSV)", type=["csv"], help="CSV must have 'frame_index' and 'mes_label'")
+                            
+                            from analytics import calculate_transition_thresholds
+                            if gt_file:
+                                try:
+                                    labels_df = pd.read_csv(gt_file)
+                                    current_thresholds = calculate_transition_thresholds(df_results, labels_df)
+                                    st.success("Calibration Successful: Thresholds updated from Ground Truth transitions.")
+                                except Exception as e:
+                                    st.warning(f"Ground Truth format error: {e}. Falling back to default heuristics.")
+                            else:
+                                st.info("No calibration file uploaded. Currently using Session-Mean heuristics.")
+
+                        with calc_col2:
+                            st.write("**Active Thresholds & Baselines:**")
+                            thresh_df = pd.DataFrame(current_thresholds.items(), columns=["Feature", "Threshold Value"])
+                            st.table(thresh_df)
+                            st.caption("Probability Model: Calibrated to M0/M3 Benchmarks")
+
+                        df_final = detect_change_points(df_smooth, current_thresholds, baselines=MAYO_BASELINES)
+                        
+                        # UI Widgets for Analytics
+                        st.markdown("### 📈 Advanced Video Analytics")
+                        
+                        # Display Trend Plot
+                        fig_trend, ax_trend = plt.subplots(figsize=(10, 4))
+                        fig_trend.patch.set_facecolor('#222831')
+                        ax_trend.set_facecolor('#222831')
+                        
+                        for feat in ["Contrast", "Homogeneity", "Entropy", "MES_Probability"]:
+                            color = 'red' if feat == "MES_Probability" else None
+                            # Plot Raw (faint)
+                            ax_trend.plot(df_results['Timestamp'], df_results.get(feat, df_results['Contrast']), alpha=0.1, color='gray' if not color else color, linestyle='--')
+                            # Plot Smoothed
+                            lw = 3 if feat == "MES_Probability" else 1.5
+                            ax_trend.plot(df_smooth['Timestamp'], df_smooth.get(feat, df_smooth['Contrast']), label=f"{feat}", marker='o', markersize=3, linewidth=lw)
+                            
+                            # Mark Change Points
+                            anomalies = df_final[df_final['Detected_Anomaly']]
+                            if not anomalies.empty:
+                                ax_trend.scatter(anomalies['Timestamp'], anomalies.get(feat, anomalies['Contrast']), color='red', s=50, edgecolors='white', zorder=5)
+
+                        # Draw Threshold Lines
+                        ax_trend.axhline(current_thresholds['Contrast'], color='orange', linestyle=':', label='Contrast Threshold')
+                        ax_trend.axhline(0.5, color='white', linestyle='--', alpha=0.3, label='50% Prob Threshold')
+                        
+                        ax_trend.set_xlabel("Time (s)", color='white')
+                        ax_trend.set_ylabel("Value", color='white')
+                        ax_trend.tick_params(colors='white')
+                        ax_trend.legend(fontsize='x-small', ncol=2)
+                        st.pyplot(fig_trend)
+                        plt.close(fig_trend)
+                        
+                        st.info("🔴 Red dots indicate detected texture transitions (potential MES increase).")
+                        st.dataframe(df_final, hide_index=True)
+                        
+                    except Exception as e:
+                        st.error(f"Batch Analysis Error: {e}")
+
         with v_col2:
-            st.markdown("#### Stats")
+            st.markdown("#### Real-time Stats")
             fps_placeholder = st.empty()
             feats_placeholder = st.empty()
 
@@ -250,7 +484,14 @@ elif mode == "Video/Real-time":
                     v_win = win_size if method_key != 'sliding_window' else max(16, win_size)
                     v_step = step_size if method_key != 'sliding_window' else max(8, step_size)
                     
-                    texture_map = generate_texture_heatmap(gray, method=method_key, win=v_win, step=v_step, levels=glcm_levels)
+                    texture_map = generate_texture_heatmap(
+                        gray, 
+                        method=method_key, 
+                        win=v_win, 
+                        step=v_step, 
+                        levels=glcm_levels,
+                        feature_to_map=feat_to_map_vid
+                    )
                     
                     heatmap_uint8 = (texture_map * 255).astype(np.uint8)
                     heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
@@ -261,7 +502,7 @@ elif mode == "Video/Real-time":
                     pass
 
             # Update UI
-            video_placeholder.image(processed_display, channels="BGR", use_container_width=True)
+            video_placeholder.image(processed_display, channels="BGR", width='stretch')
             
             end_time = time.time()
             fps = 1.0 / (end_time - start_time + 1e-6)
@@ -269,9 +510,9 @@ elif mode == "Video/Real-time":
             
             # Extract features for current frame
             try:
-                current_feats = extract_all_features(gray, levels=glcm_levels)
+                current_feats = extract_refined_features(gray, levels=glcm_levels)
                 feat_df_vid = pd.DataFrame(current_feats.items(), columns=["Feature", "Value"])
-                feats_placeholder.dataframe(feat_df_vid, height=300)
+                feats_placeholder.dataframe(feat_df_vid, hide_index=True)
             except:
                 pass
                 

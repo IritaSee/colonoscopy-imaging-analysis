@@ -101,18 +101,47 @@ def calculate_mes_probability(feats, baselines):
         
     return total_score / total_weight
 
-def detect_change_points(df, thresholds, baselines=None):
+def classify_mes_level(feats, centroids):
+    """
+    Finds the closest MES level (0, 1, 2, or 3) using weighted Euclidean distance.
+    Returns a string like 'MES 0', 'MES 1', etc.
+    """
+    weights = {
+        "Entropy": 1.0,
+        "Entropy_GLCM": 1.2,
+        "Contrast": 0.8,
+        "Homogeneity": 0.5
+    }
+    
+    min_dist = float('inf')
+    closest_label = "N/A"
+    
+    for label, center in centroids.items():
+        dist = 0.0
+        for feat, w in weights.items():
+            if feat in feats and feat in center:
+                dist += w * (feats[feat] - center[feat])**2
+        
+        dist = np.sqrt(dist)
+        if dist < min_dist:
+            min_dist = dist
+            closest_label = label
+            
+    return closest_label
+
+def detect_change_points(df, thresholds, baselines=None, centroids=None):
     """
     Detects points in time where features cross calculated thresholds.
-    Also calculates a frame-by-frame probability if baselines are provided.
+    Also calculates frame-by-frame probability and classification.
     
     Args:
         df (pd.DataFrame): Smoothed feature DataFrame.
         thresholds (dict): Feature thresholds.
         baselines (dict): Optional M0/M3 baselines for probability scoring.
+        centroids (dict): Optional M0-M3 centroids for specific classification.
         
     Returns:
-        pd.DataFrame: Original DF with 'Detected_Anomaly' and 'MES_Probability'.
+        pd.DataFrame: Original DF with 'Detected_Anomaly', 'MES_Probability', and 'Predicted_MES'.
     """
     df = df.copy()
     df['Anomaly_Score'] = 0
@@ -126,11 +155,16 @@ def detect_change_points(df, thresholds, baselines=None):
         
     df['Detected_Anomaly'] = df['Anomaly_Score'] >= 1
     
-    # Probability Tracking (Multivariate distance)
+    # Probability Tracking
     if baselines:
         df['MES_Probability'] = df.apply(lambda row: calculate_mes_probability(row.to_dict(), baselines), axis=1)
     else:
-        # Fallback simplistic probability based on anomaly score
         df['MES_Probability'] = df['Anomaly_Score'] / 2.0
+
+    # Specific MES Classification
+    if centroids:
+        df['Predicted_MES'] = df.apply(lambda row: classify_mes_level(row.to_dict(), centroids), axis=1)
+    else:
+        df['Predicted_MES'] = df['MES_Probability'].apply(lambda p: f"MES {round(p*3)}")
     
     return df

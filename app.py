@@ -14,6 +14,8 @@ import seaborn as sns
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
 from features import extract_refined_features, extract_all_features, generate_texture_heatmap
+from video_analyzer import analyze_video
+from analytics import smooth_video_features, detect_change_points, calculate_mes_probability, classify_mes_level, calculate_transition_thresholds
 
 # Reference Baselines (Calibrated from data_sample/ benchmark)
 MAYO_BASELINES = {
@@ -36,6 +38,14 @@ REFERENCE_THRESHOLDS = {
     "Entropy": 6.30,      # > threshold is abnormal
     "Energy": 0.045,      # < threshold is abnormal
     "ASM": 0.068          # < threshold is abnormal
+}
+
+# Centroids for classification (M0-M3)
+MAYO_CENTROIDS = {
+    "MES 0": {"Contrast": 1.15, "Homogeneity": 0.79, "Entropy": 6.11, "Energy": 0.047, "ASM": 0.073, "Entropy_GLCM": 5.08},
+    "MES 1": {"Contrast": 2.45, "Homogeneity": 0.72, "Entropy": 6.18, "Energy": 0.043, "ASM": 0.062, "Entropy_GLCM": 5.51},
+    "MES 2": {"Contrast": 2.15, "Homogeneity": 0.74, "Entropy": 6.13, "Energy": 0.043, "ASM": 0.066, "Entropy_GLCM": 5.33},
+    "MES 3": {"Contrast": 2.10, "Homogeneity": 0.73, "Entropy": 6.51, "Energy": 0.038, "ASM": 0.055, "Entropy_GLCM": 5.79}
 }
 
 def plot_radar_comparison(current_feats):
@@ -151,8 +161,13 @@ with st.sidebar:
     
     mode = st.radio("Mode", ["Single Image Analysis", "Video/Real-time"])
     
-    st.markdown("### Analysis Parameters")
-    glcm_levels = st.slider("GLCM Levels", 8, 256, 32, step=8)
+    st.markdown("---")
+    st.markdown("### 🖼️ Processing Params")
+    glcm_levels = st.select_slider("GLCM Quantization Levels", options=[8, 16, 32, 64], value=32)
+    
+    st.markdown("### 🔍 Video Settings")
+    analysis_depth = st.radio("Analysis Depth", ["Fast (1 FPS)", "Full (Every Frame)"], index=0)
+    show_every_frame = (analysis_depth == "Full (Every Frame)")
     
     # --- New Sliding Window Parameters ---
     st.markdown("### Sliding Window Config")
@@ -279,10 +294,11 @@ if mode == "Single Image Analysis":
             st.table(pd.DataFrame(comparison_data))
 
             st.markdown("---")
-            st.markdown("### 🧪 Probability Model")
-            from analytics import calculate_mes_probability
+            st.markdown("### 🧪 Probability & Classification")
             prob = calculate_mes_probability(feats, MAYO_BASELINES)
+            predicted_mes = classify_mes_level(feats, MAYO_CENTROIDS)
             
+            st.write(f"**Predicted State:** {predicted_mes}")
             st.metric("Inflammation Probability", f"{prob*100:.1f}%", help="Likelihood of active inflammation (MES >= 1) based on multivariate texture distance.")
             
             if prob > 0.7:
@@ -362,12 +378,10 @@ elif mode == "Video/Real-time":
             if st.button("🚀 Run Full Video Analysis (Batch Process)"):
                 with st.spinner("Processing every second of video..."):
                     try:
-                        from video_analyzer import analyze_video
-                        from analytics import smooth_video_features, detect_change_points
-                        
                         # Temp output CSV
                         out_csv = tfile.name + "_features.csv"
-                        df_results = analyze_video(tfile.name, output_csv=out_csv, sample_rate_fps=1.0)
+                        fps_setting = 0 if show_every_frame else 1.0
+                        df_results = analyze_video(tfile.name, output_csv=out_csv, sample_rate_fps=fps_setting, gl_levels=glcm_levels)
                         
                         # Apply Smoothing
                         smooth_win = st.sidebar.slider("Smoothing Window", 1, 11, 5, step=2)
@@ -391,7 +405,6 @@ elif mode == "Video/Real-time":
                             st.write("**Calibration Source:**")
                             gt_file = st.file_uploader("Upload Ground Truth (CSV)", type=["csv"], help="CSV must have 'frame_index' and 'mes_label'")
                             
-                            from analytics import calculate_transition_thresholds
                             if gt_file:
                                 try:
                                     labels_df = pd.read_csv(gt_file)
@@ -408,7 +421,7 @@ elif mode == "Video/Real-time":
                             st.table(thresh_df)
                             st.caption("Probability Model: Calibrated to M0/M3 Benchmarks")
 
-                        df_final = detect_change_points(df_smooth, current_thresholds, baselines=MAYO_BASELINES)
+                        df_final = detect_change_points(df_smooth, current_thresholds, baselines=MAYO_BASELINES, centroids=MAYO_CENTROIDS)
                         
                         # UI Widgets for Analytics
                         st.markdown("### 📈 Advanced Video Analytics")
@@ -451,10 +464,11 @@ elif mode == "Video/Real-time":
         with v_col2:
             st.markdown("#### Real-time Stats")
             fps_placeholder = st.empty()
+            mes_placeholder = st.empty()
             feats_placeholder = st.empty()
 
         # Optimization Parameters
-        frame_skip = 5 # Process every 5th frame
+        frame_skip = 1 if show_every_frame else 5 
         count = 0
         
         while cap.isOpened():
@@ -511,6 +525,14 @@ elif mode == "Video/Real-time":
             # Extract features for current frame
             try:
                 current_feats = extract_refined_features(gray, levels=glcm_levels)
+                predicted_mes = classify_mes_level(current_feats, MAYO_CENTROIDS)
+                
+                # Show Predicted MES and Stats
+                if "0" not in predicted_mes:
+                    mes_placeholder.error(f"**Current State: {predicted_mes}**")
+                else:
+                    mes_placeholder.success(f"**Current State: {predicted_mes}**")
+                
                 feat_df_vid = pd.DataFrame(current_feats.items(), columns=["Feature", "Value"])
                 feats_placeholder.dataframe(feat_df_vid, hide_index=True)
             except:

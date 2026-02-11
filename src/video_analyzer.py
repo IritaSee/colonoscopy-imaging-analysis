@@ -6,7 +6,7 @@ import os
 import time
 from features import extract_refined_features
 
-def analyze_video(video_path, output_csv=None, sample_rate_fps=1.0, resize_dims=(400, 400)):
+def analyze_video(video_path, output_csv=None, sample_rate_fps=1.0, resize_dims=(400, 400), gl_levels=32):
     """
     Analyzes a video file frame-by-frame (sampled) and extracts refined texture features.
     
@@ -30,7 +30,11 @@ def analyze_video(video_path, output_csv=None, sample_rate_fps=1.0, resize_dims=
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration_sec = total_frames / video_fps if video_fps > 0 else 0
     
-    frame_interval = int(video_fps / sample_rate_fps) if sample_rate_fps > 0 else 1
+    if sample_rate_fps <= 0:
+        frame_interval = 1
+    else:
+        frame_interval = int(video_fps / sample_rate_fps) if sample_rate_fps > 0 else 1
+    
     frame_interval = max(1, frame_interval)
     
     print(f"Analyzing Video: {os.path.basename(video_path)}")
@@ -58,7 +62,7 @@ def analyze_video(video_path, output_csv=None, sample_rate_fps=1.0, resize_dims=
             
             # Extract features
             try:
-                feats = extract_refined_features(gray)
+                feats = extract_refined_features(gray, levels=gl_levels)
                 feats['Timestamp'] = round(timestamp, 2)
                 feats['FrameIndex'] = frame_idx
                 all_frame_data.append(feats)

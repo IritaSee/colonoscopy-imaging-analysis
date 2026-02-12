@@ -471,6 +471,36 @@ elif mode == "Video/Real-time":
         frame_skip = 1 if show_every_frame else 5 
         count = 0
         
+        # --- NEW: Context for Real-time Alerts ---
+        prev_feats = None
+        prev_mes = "Unknown"
+        
+        # --- LAYOUT RESTORATION: Place everything in v_col2 (Right Side) ---
+        with v_col2:
+            st.markdown("### ⏱️ Real-time")
+            
+            # Status Banner & FPS
+            mes_alert_spot = st.empty()
+            fps_display = st.empty()
+            
+            st.markdown("#### Dynamic Metrics")
+            # Use columns within the sidebar column for compact metrics
+            mc1, mc2 = st.columns(2)
+            with mc1:
+                metric_contrast = st.empty()
+                metric_homogeneity = st.empty()
+            with mc2:
+                metric_entropy = st.empty()
+                metric_prob = st.empty()
+                
+            st.markdown("#### Feature Data")
+            # Re-use the placeholder variable, but ensure it's in this column
+            feats_table_spot = st.empty()
+            
+            # Expander for full list (defined outside loop to be stable)
+            with st.expander("📝 View All 20 Texture Features"):
+                all_feats_table_spot = st.empty()
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -515,27 +545,73 @@ elif mode == "Video/Real-time":
                 except:
                     pass
 
-            # Update UI
+            # Update UI Video
             video_placeholder.image(processed_display, channels="BGR", width='stretch')
             
             end_time = time.time()
             fps = 1.0 / (end_time - start_time + 1e-6)
-            fps_placeholder.metric("Processing FPS", f"{fps:.1f}")
+            fps_display.metric("FPS", f"{fps:.1f}")
             
             # Extract features for current frame
             try:
-                current_feats = extract_refined_features(gray, levels=glcm_levels)
+                # UPDATED: Extract ALL features, then filter for display
+                current_feats = extract_all_features(gray, levels=glcm_levels)
+                
+                # Filter for Top 5 (+ Entropy_GLCM/Correlation used in classification)
+                top_keys = ["Contrast", "Homogeneity", "Entropy", "Energy", "ASM"]
+                top_5_feats = {k: current_feats.get(k, 0) for k in top_keys}
+                
                 predicted_mes = classify_mes_level(current_feats, MAYO_CENTROIDS)
+                prob = calculate_mes_probability(current_feats, MAYO_BASELINES)
                 
-                # Show Predicted MES and Stats
+                # --- ALERT LOGIC ---
+                # Check for State Change (e.g. MES 0 -> MES 1)
+                if prev_mes != "Unknown" and predicted_mes != prev_mes:
+                    if "0" in prev_mes and "0" not in predicted_mes:
+                         st.toast(f"⚠️ Alert: Inflammation Detected! ({predicted_mes})", icon="🚨")
+                    elif "0" not in prev_mes and "0" in predicted_mes:
+                         st.toast(f"✅ Recovery: Returning to Normal State ({predicted_mes})", icon="🌿")
+                
+                # Update Status Banner
                 if "0" not in predicted_mes:
-                    mes_placeholder.error(f"**Current State: {predicted_mes}**")
+                    mes_alert_spot.error(f"**{predicted_mes}**")
                 else:
-                    mes_placeholder.success(f"**Current State: {predicted_mes}**")
+                    mes_alert_spot.success(f"**{predicted_mes}**")
                 
-                feat_df_vid = pd.DataFrame(current_feats.items(), columns=["Feature", "Value"])
-                feats_placeholder.dataframe(feat_df_vid, hide_index=True)
-            except:
+                # --- DYNAMIC METRICS (Deltas) ---
+                def get_delta(key, curr_val):
+                    if prev_feats is None: return None
+                    return curr_val - prev_feats.get(key, curr_val)
+
+                # Helper to display metric with delta
+                col_map = {
+                    "Contrast": metric_contrast,
+                    "Homogeneity": metric_homogeneity,
+                    "Entropy": metric_entropy,
+                }
+                
+                for key, slot in col_map.items():
+                    val = current_feats.get(key, 0)
+                    delta = get_delta(key, val)
+                    slot.metric(label=key, value=f"{val:.2f}", delta=f"{delta:.2f}" if delta is not None else None)
+                
+                metric_prob.metric("Inf. Prob", f"{prob:.2f}", delta=None, delta_color="inverse")
+
+                # Update Previous Context
+                prev_feats = current_feats
+                prev_mes = predicted_mes
+                
+                # Display Top 5 Table
+                feat_df_top = pd.DataFrame(top_5_feats.items(), columns=["Feature", "Value"])
+                feats_table_spot.dataframe(feat_df_top, hide_index=True)
+                
+                # Display All 20 Table (Hidden by default in expander)
+                feat_df_all = pd.DataFrame(current_feats.items(), columns=["Feature", "Value"])
+                all_feats_table_spot.dataframe(feat_df_all, hide_index=True, height=300)
+                
+            except Exception as e:
+                # Keep going if a single frame fails
+                print(f"Frame processing error: {e}")
                 pass
                 
             time.sleep(0.01)
